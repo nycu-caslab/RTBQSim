@@ -9,12 +9,14 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${ROOT_DIR}/build-rt"
 
-## == GAS/BVH update strategy ==
-: "${RT_GAS_ALLOW_UPDATE:=1}" # 1: allow OptiX GAS update when primitive count unchanged.
-: "${RT_REUSE_BUFFER:=1}" # 1: reuse GAS output + sphere/ray geometry work buffers to reduce cudaMalloc/cudaFree.
+## different strategy ==
+: "${RT_GAS_ALLOW_UPDATE:=1}" # 進行 bvh tree refit，1: allow OptiX GAS update when primitive count unchanged.
+: "${RT_REUSE_BUFFER:=1}" # 進行 memory buffer reuse ， 1: reuse GAS output + sphere/ray geometry work buffers to reduce cudaMalloc/cudaFree.
 : "${RT_PRIMITIVE_TYPE:=triangle}" # triangle|sphere: choose the RTSpMSpM primitive used for OptiX traversal.
-: "${RT_NNZ1_SPECIAL:=1}" # 1: enable diagonal and row_nnz=1 special fast paths; 0: force both kinds of gates through the regular RT path.
-: "${RT_ENABLE_GATE_FUSION:=1}" # 1: enable Stage-1 gate fusion, 0: bypass fusion and directly pack primitive gates into Stage-2 ELL inputs.
+: "${RT_NNZ1_SPECIAL:=1}" # 進行 nnz = 1 的特殊處理 1: enable diagonal and row_nnz=1 special fast paths; 0: force both kinds of gates through the regular RT path.
+: "${RT_ENABLE_GATE_FUSION:=1}" # 進行 gate fusion，1: enable Stage-1 gate fusion, 0: bypass fusion and directly pack primitive gates into Stage-2 ELL inputs.
+: "${RT_USE_DAG_FUSION:=1}" # 採用 DAG 進行 gate fusion planning 1: use DAG/dependency-graph gate fusion planning; 0: use sequential gate fusion with the same row-NNZ limit.
+: "${RT_ELL_SORTING:=1}" # 啟用 ell sorting ， 1: lexicographically reorder fused ELL rows by access pattern before Stage-2 simulation.
 : "${RT_ENABLE_BREAKDOWN:=1}" # 1: print and collect Stage-1/Stage-2 breakdown timing for main benchmarks.
 : "${RT_DEBUG_INFO:=1}" # 1: keep per-benchmark debug logs and summarize suspicious fused blocks (ELL width > 4).
 
@@ -29,6 +31,8 @@ export RT_NNZ1_SPECIAL
 export RT_DUMP_TREE_OWNER_AVG
 export RT_DUMP_GATE_TRAVERSAL
 export RT_ENABLE_GATE_FUSION
+export RT_USE_DAG_FUSION
+export RT_ELL_SORTING
 export RT_ENABLE_BREAKDOWN
 export RT_DEBUG_INFO
 

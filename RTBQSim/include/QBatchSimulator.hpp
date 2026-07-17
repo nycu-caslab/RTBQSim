@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <climits>
 #include <thread>
 #include <cstdlib>
 #include <cstring>
@@ -197,41 +198,53 @@ inline std::size_t fusedGateSharedBytes(int num_non_zero) {
          static_cast<std::size_t>(std::max(num_non_zero, 0)) * sizeof(bqsim_rt::Complex);
 }
 
+template <int KeyWidth>
 struct RowSortKey {
-  int v0;
-  int v1;
-  int v2;
-  int v3;
+  int values[KeyWidth];
 
   __host__ __device__ bool operator<(const RowSortKey& other) const {
-    if (v0 != other.v0) return v0 < other.v0;
-    if (v1 != other.v1) return v1 < other.v1;
-    if (v2 != other.v2) return v2 < other.v2;
-    return v3 < other.v3;
+    for (int i = 0; i < KeyWidth; ++i) {
+      if (values[i] != other.values[i]) {
+        return values[i] < other.values[i];
+      }
+    }
+    return false;
   }
 };
 
-__global__ void build_row_order_keys_w4(const int* gates_indices,
-                                        RowSortKey* row_keys,
-                                        int* row_order,
-                                        int nDim) {
+template <int KeyWidth>
+__global__ void build_row_order_keys(const int* gates_indices,
+                                     RowSortKey<KeyWidth>* row_keys,
+                                     int* row_order,
+                                     int nDim,
+                                     int ell_width) {
   const int row = blockIdx.x * blockDim.x + threadIdx.x;
   if (row >= nDim) {
     return;
   }
 
-  int a = gates_indices[row * 4 + 0];
-  int b = gates_indices[row * 4 + 1];
-  int c = gates_indices[row * 4 + 2];
-  int d = gates_indices[row * 4 + 3];
+  RowSortKey<KeyWidth> key{};
+  for (int i = 0; i < KeyWidth; ++i) {
+    key.values[i] = INT_MAX;
+  }
 
-  if (b < a) { const int t = a; a = b; b = t; }
-  if (d < c) { const int t = c; c = d; d = t; }
-  if (c < a) { const int t = a; a = c; c = t; }
-  if (d < b) { const int t = b; b = d; d = t; }
-  if (c < b) { const int t = b; b = c; c = t; }
+  const int key_width = (ell_width < KeyWidth) ? ell_width : KeyWidth;
+  const int base = row * ell_width;
+  for (int i = 0; i < key_width; ++i) {
+    key.values[i] = gates_indices[base + i];
+  }
 
-  row_keys[row] = RowSortKey{a, b, c, d};
+  for (int i = 1; i < key_width; ++i) {
+    const int value = key.values[i];
+    int j = i - 1;
+    while (j >= 0 && key.values[j] > value) {
+      key.values[j + 1] = key.values[j];
+      --j;
+    }
+    key.values[j + 1] = value;
+  }
+
+  row_keys[row] = key;
   row_order[row] = row;
 }
 
@@ -241,6 +254,82 @@ __global__ void init_identity_row_order(int* row_order, int nDim) {
     return;
   }
   row_order[row] = row;
+}
+
+template <int KeyWidth>
+inline bool sortRowOrderByAccessPattern(const int* gates_indices,
+                                        int* row_order,
+                                        int nDim,
+                                        int ell_width,
+                                        int blocks,
+                                        int threads_per_block) {
+  RowSortKey<KeyWidth>* row_keys = nullptr;
+  const std::size_t row_key_bytes =
+      static_cast<std::size_t>(nDim) * sizeof(RowSortKey<KeyWidth>);
+  if (cudaMalloc((void**)&row_keys, row_key_bytes) != cudaSuccess) {
+    cudaGetLastError();
+    std::cerr << "[SPMSPM] row-order key allocation failed "
+              << "(row_keys=" << row_key_bytes
+              << " bytes, ell_width=" << ell_width
+              << "; " << cudaMemInfoString()
+              << "); using identity row order." << std::endl;
+    return false;
+  }
+
+  build_row_order_keys<KeyWidth><<<blocks, threads_per_block>>>(
+      gates_indices, row_keys, row_order, nDim, ell_width);
+  checkCudaErrors(cudaGetLastError());
+  thrust::stable_sort_by_key(thrust::device,
+                             thrust::device_pointer_cast(row_keys),
+                             thrust::device_pointer_cast(row_keys + nDim),
+                             thrust::device_pointer_cast(row_order));
+  checkCudaErrors(cudaFree(row_keys));
+  return true;
+}
+
+inline bool sortRowOrderByELLWidth(const int* gates_indices,
+                                   int* row_order,
+                                   int nDim,
+                                   int ell_width,
+                                   int blocks,
+                                   int threads_per_block) {
+  if (ell_width <= 0) {
+    return false;
+  }
+  if (ell_width <= 1) {
+    return sortRowOrderByAccessPattern<1>(
+        gates_indices, row_order, nDim, ell_width, blocks, threads_per_block);
+  }
+  if (ell_width <= 2) {
+    return sortRowOrderByAccessPattern<2>(
+        gates_indices, row_order, nDim, ell_width, blocks, threads_per_block);
+  }
+  if (ell_width <= 4) {
+    return sortRowOrderByAccessPattern<4>(
+        gates_indices, row_order, nDim, ell_width, blocks, threads_per_block);
+  }
+  if (ell_width <= 8) {
+    return sortRowOrderByAccessPattern<8>(
+        gates_indices, row_order, nDim, ell_width, blocks, threads_per_block);
+  }
+  if (ell_width <= 16) {
+    return sortRowOrderByAccessPattern<16>(
+        gates_indices, row_order, nDim, ell_width, blocks, threads_per_block);
+  }
+  if (ell_width <= 32) {
+    return sortRowOrderByAccessPattern<32>(
+        gates_indices, row_order, nDim, ell_width, blocks, threads_per_block);
+  }
+  if (ell_width <= 64) {
+    return sortRowOrderByAccessPattern<64>(
+        gates_indices, row_order, nDim, ell_width, blocks, threads_per_block);
+  }
+
+  std::cerr << "[SPMSPM] ELL row-order sorting skipped for ell_width="
+            << ell_width
+            << " because the sort-key capacity is 64; using identity row order."
+            << std::endl;
+  return false;
 }
 
 inline int directPrimitiveELLWidth(const qc::GatePrimitive& gate) {
@@ -643,7 +732,7 @@ public:
         } else if (use_spm_pipeline) {
           auto begin_convert = std::chrono::high_resolution_clock::now();
           double primitive_build_ms = 0.0;
-          double dag_planning_ms = 0.0;
+          double planning_ms = 0.0;
           std::vector<qc::GatePrimitive> primitives;
           const auto primitive_build_start = std::chrono::high_resolution_clock::now();
           if (!bqsim_rt::buildGatePrimitives(*qc, primitives)) {
@@ -654,15 +743,21 @@ public:
           primitive_build_ms =
               std::chrono::duration<double, std::milli>(primitive_build_stop - primitive_build_start).count();
           const int row_nnz_limit = envInt("BQSIM_RT_SPM_ROW_NNZ_LIMIT", 4);
+          const bool use_dag_fusion = envFlagDefaultTrue("RT_USE_DAG_FUSION");
           bqsim_rt::GateFusionPlan fusion_plan;
-          const auto dag_plan_start = std::chrono::high_resolution_clock::now();
-          if (!bqsim_rt::buildGateFusionPlan(primitives, row_nnz_limit, fusion_plan)) {
-            std::cerr << "[SPMSPM] DAG gate-fusion planning failed; aborting SPMSPM pipeline." << std::endl;
+          const auto plan_start = std::chrono::high_resolution_clock::now();
+          const bool plan_ok = use_dag_fusion
+                                   ? bqsim_rt::buildGateFusionPlan(primitives, row_nnz_limit, fusion_plan)
+                                   : bqsim_rt::buildSequentialGateFusionPlan(primitives, row_nnz_limit, fusion_plan);
+          if (!plan_ok) {
+            std::cerr << "[SPMSPM] "
+                      << (use_dag_fusion ? "DAG" : "Sequential")
+                      << " gate-fusion planning failed; aborting SPMSPM pipeline." << std::endl;
             return;
           }
-          const auto dag_plan_stop = std::chrono::high_resolution_clock::now();
-          dag_planning_ms =
-              std::chrono::duration<double, std::milli>(dag_plan_stop - dag_plan_start).count();
+          const auto plan_stop = std::chrono::high_resolution_clock::now();
+          planning_ms =
+              std::chrono::duration<double, std::milli>(plan_stop - plan_start).count();
           primitives = std::move(fusion_plan.ordered_primitives);
           const std::vector<std::size_t> planned_blocks = std::move(fusion_plan.block_sizes);
           const size_t total_gates = primitives.size();
@@ -801,8 +896,8 @@ public:
             }
           }
           const auto stage1_setup_stop = std::chrono::high_resolution_clock::now();
-          total_overhead_ms += dag_planning_ms;
-          total_overhead_ms += std::chrono::duration<double, std::milli>(stage1_setup_stop - dag_plan_stop).count();
+          total_overhead_ms += planning_ms;
+          total_overhead_ms += std::chrono::duration<double, std::milli>(stage1_setup_stop - plan_stop).count();
           const auto run_spm_pipeline = [&](auto* engine) {
             const char* backend_name = "rtspmspm";
             std::deque<std::size_t> pending_blocks(planned_blocks.begin(), planned_blocks.end());
@@ -959,9 +1054,7 @@ public:
               const auto post_ell_host_start = std::chrono::high_resolution_clock::now();
               if (engine->collectResultToELL(fused_gate_val, fused_gate_indices, ell_width, nDim)) {
                 int* fused_gate_row_order = nullptr;
-                RowSortKey* fused_gate_row_keys = nullptr;
                 const std::size_t row_order_bytes = static_cast<std::size_t>(nDim) * sizeof(int);
-                const std::size_t row_key_bytes = static_cast<std::size_t>(nDim) * sizeof(RowSortKey);
                 constexpr int kThreadsPerBlock = 256;
                 const int blocks = static_cast<int>((nDim + kThreadsPerBlock - 1) / kThreadsPerBlock);
                 if (cudaMalloc((void**)&fused_gate_row_order, row_order_bytes) != cudaSuccess) {
@@ -983,25 +1076,13 @@ public:
                 init_identity_row_order<<<blocks, kThreadsPerBlock>>>(
                     fused_gate_row_order, static_cast<int>(nDim));
                 checkCudaErrors(cudaGetLastError());
-                if (ell_width == 4) {
-                  if (cudaMalloc((void**)&fused_gate_row_keys, row_key_bytes) == cudaSuccess) {
-                    build_row_order_keys_w4<<<blocks, kThreadsPerBlock>>>(
-                        fused_gate_indices, fused_gate_row_keys, fused_gate_row_order, static_cast<int>(nDim));
-                    checkCudaErrors(cudaGetLastError());
-                    thrust::stable_sort_by_key(thrust::device,
-                                               thrust::device_pointer_cast(fused_gate_row_keys),
-                                               thrust::device_pointer_cast(fused_gate_row_keys + nDim),
-                                               thrust::device_pointer_cast(fused_gate_row_order));
-                  } else {
-                    cudaGetLastError();
-                    std::cerr << "[SPMSPM] row-order key allocation failed "
-                              << "(row_keys=" << row_key_bytes
-                              << " bytes; " << cudaMemInfoString()
-                              << "); using identity row order." << std::endl;
-                  }
-                }
-                if (fused_gate_row_keys) {
-                  checkCudaErrors(cudaFree(fused_gate_row_keys));
+                if (envFlagDefaultTrue("RT_ELL_SORTING")) {
+                  sortRowOrderByELLWidth(fused_gate_indices,
+                                         fused_gate_row_order,
+                                         static_cast<int>(nDim),
+                                         ell_width,
+                                         blocks,
+                                         kThreadsPerBlock);
                 }
                 auto ell_stop = std::chrono::high_resolution_clock::now();
                 total_ell_convert_ms += std::chrono::duration<double, std::milli>(ell_stop - ell_start).count();
@@ -1057,7 +1138,7 @@ public:
               ++block_id;
             }
             if (cursor != total_gates || !pending_blocks.empty()) {
-              std::cerr << "[SPMSPM] DAG plan execution ended early (cursor="
+              std::cerr << "[SPMSPM] Gate-fusion plan execution ended early (cursor="
                         << cursor << "/" << total_gates
                         << ", remaining_blocks=" << pending_blocks.size()
                         << "); aborting SPMSPM pipeline." << std::endl;

@@ -483,4 +483,56 @@ inline bool buildGateFusionPlan(const std::vector<qc::GatePrimitive>& primitives
   return out.ordered_primitives.size() == primitives.size();
 }
 
+inline bool buildSequentialGateFusionPlan(const std::vector<qc::GatePrimitive>& primitives,
+                                          int row_nnz_limit,
+                                          GateFusionPlan& out) {
+  out.ordered_primitives.clear();
+  out.block_sizes.clear();
+  if (primitives.empty()) {
+    return true;
+  }
+
+  const int max_group_qubits = plannerMaxGroupQubitsFromRowNNZLimit(row_nnz_limit);
+  out.ordered_primitives.reserve(primitives.size());
+  out.block_sizes.reserve(primitives.size());
+
+  PlannerBlockState current_state;
+  std::size_t current_block_size = 0;
+
+  for (std::size_t idx = 0; idx < primitives.size(); ++idx) {
+    const auto gate_qubits = plannerTouchedQubits(primitives[idx]);
+    PlannerBlockState trial_state = current_state;
+    if (plannerApplyGateToBlockState(primitives[idx],
+                                     gate_qubits,
+                                     max_group_qubits,
+                                     trial_state)) {
+      current_state = std::move(trial_state);
+      ++current_block_size;
+      out.ordered_primitives.push_back(primitives[idx]);
+      continue;
+    }
+
+    if (current_block_size == 0) {
+      return false;
+    }
+    out.block_sizes.push_back(current_block_size);
+
+    current_state = PlannerBlockState{};
+    current_block_size = 0;
+    if (!plannerApplyGateToBlockState(primitives[idx],
+                                      gate_qubits,
+                                      max_group_qubits,
+                                      current_state)) {
+      return false;
+    }
+    current_block_size = 1;
+    out.ordered_primitives.push_back(primitives[idx]);
+  }
+
+  if (current_block_size > 0) {
+    out.block_sizes.push_back(current_block_size);
+  }
+  return out.ordered_primitives.size() == primitives.size();
+}
+
 }  // namespace bqsim_rt
