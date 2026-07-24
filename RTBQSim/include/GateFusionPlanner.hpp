@@ -216,6 +216,18 @@ inline bool plannerApplyGateToBlockState(const qc::GatePrimitive& gate,
   }
 
   if (plannerGateIsBridgeControlledX(gate)) {
+    std::vector<int> control_qubits;
+    control_qubits.reserve(static_cast<std::size_t>(gate.control_count));
+    for (int i = 0; i < gate.control_count; ++i) {
+      control_qubits.push_back(gate.controls[i]);
+    }
+    std::sort(control_qubits.begin(), control_qubits.end());
+    control_qubits.erase(std::unique(control_qubits.begin(), control_qubits.end()),
+                         control_qubits.end());
+    if (!plannerIntersectsQubits(control_qubits, state.active_support)) {
+      return true;
+    }
+
     std::vector<int> merged_component = gate_qubits;
     std::vector<std::vector<int>> kept_components;
     kept_components.reserve(state.bridge_components.size());
