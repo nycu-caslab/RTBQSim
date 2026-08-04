@@ -148,5 +148,5 @@ Main outputs:
 ## Outputs and Logs
 Common output paths (may vary slightly by runtime options):
 - `RTBQSim/log/`: run outputs and state dumps (for example, `log/results/state/*.txt`)
-- `RTBQSim/log/fused_gates/`: fused-gate exports when enabled
+- `RTBQSim/log/fused_gates/`: optional Qiskit fused gate export files
 - `RTBQSim/build-rt/`: build artifacts
