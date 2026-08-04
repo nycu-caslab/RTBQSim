@@ -1,13 +1,11 @@
 import argparse
+import subprocess
 from pathlib import Path
 
 import numpy as np
-import qiskit.qasm2 as qasm2
-from qiskit import QuantumCircuit, transpile
-from qiskit_aer import AerSimulator
 
 
-def load_statevector(path) :
+def load_statevector(path):
     data = np.loadtxt(path, dtype=np.float64)
 
     if data.ndim == 2:
@@ -24,63 +22,90 @@ def load_statevector(path) :
     raise ValueError(f"Unsupported data shape {data.shape} in {path}")
 
 
-def normalize(vec, name) :
+def normalize(vec, name):
     norm = np.linalg.norm(vec)
     if np.isclose(norm, 0.0):
         raise ValueError(f"{name} statevector has zero norm")
     return vec / norm
 
 
-def build_qiskit_reference(qasm_path, input_state_path, device) :
-    init_state = load_statevector(input_state_path)
-    sim = AerSimulator(method="statevector", device=device.upper())
-    try:
-        qc_main = qasm2.load(str(qasm_path))
-    except Exception:
-        qc_main = qasm2.load(
-            str(qasm_path),
-            custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS,
-        )
-    qc_main = transpile(qc_main, sim, optimization_level=0)
+def build_cuquantum_reference(
+    circuit_name,
+    num_qubits,
+    batch_size,
+    num_batch,
+    cuquantum_binary,
+    reference_path,
+    reuse_reference,
+):
+    if reuse_reference and reference_path.exists():
+        return 0
 
-    qc = QuantumCircuit(qc_main.num_qubits)
-    qc.set_statevector(init_state)
-    qc = qc.compose(qc_main)
-    qc.save_statevector()
+    if not cuquantum_binary.exists():
+        print(f"Missing cuQuantum binary: {cuquantum_binary}")
+        print("Build it first with: bash cuquantum_compile.sh")
+        return 1
 
-    result = sim.run(qc).result()
-    return np.asarray(result.get_statevector(qc), dtype=np.complex128)
+    reference_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(cuquantum_binary),
+        circuit_name,
+        str(num_qubits),
+        str(batch_size),
+        str(num_batch),
+        "0",  # raw circuit path, no Qiskit fused gate file
+        "1",  # output state file for fidelity verification
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=cuquantum_binary.parent,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        print("cuQuantum reference generation failed.")
+        if result.stdout.strip():
+            print("cuQuantum stdout:")
+            print(result.stdout.rstrip())
+        if result.stderr.strip():
+            print("cuQuantum stderr:")
+            print(result.stderr.rstrip())
+        return result.returncode
+
+    if not reference_path.exists():
+        print(f"cuQuantum did not create expected reference file: {reference_path}")
+        return 1
+
+    return 0
 
 
 def verify(
     circuit_name,
     num_qubits,
-    qasm_path,
-    input_state_path,
     qbsim_path,
-    device,
+    reference_path,
     fidelity_threshold,
     rmse_threshold,
-) :
-    for p in (qasm_path, input_state_path, qbsim_path):
+):
+    for p in (qbsim_path, reference_path):
         if not p.exists():
             print(f"Missing file: {p}")
             return 1
-    print(f"=======================================")
+
+    print("=======================================")
     print(f"benchmark:    {circuit_name}_n{num_qubits}")
-    # print(f"QASM:  {qasm_path}")
-    # print(f"Input: {input_state_path}")
-    # print(f"QBSim: {qbsim_path}")
+    print("Reference:    cuQuantum")
 
     v_sim = load_statevector(qbsim_path)
-    v_ref = build_qiskit_reference(qasm_path, input_state_path, device)
+    v_ref = load_statevector(reference_path)
 
     if len(v_sim) != len(v_ref):
-        print(f"Length mismatch: QBSim={len(v_sim)} vs Qiskit={len(v_ref)}")
+        print(f"Length mismatch: RTBQSim={len(v_sim)} vs cuQuantum={len(v_ref)}")
         return 1
 
-    v_sim = normalize(v_sim, "QBSim")
-    v_ref = normalize(v_ref, "Qiskit")
+    v_sim = normalize(v_sim, "RTBQSim")
+    v_ref = normalize(v_ref, "cuQuantum")
 
     overlap = np.vdot(v_sim, v_ref)
     if np.abs(overlap) > 0:
@@ -107,40 +132,60 @@ def verify(
     return 2
 
 
-def main() :
-    parser = argparse.ArgumentParser(description="Verify QBSim statevector with Qiskit.")
+def main():
+    parser = argparse.ArgumentParser(description="Verify RTBQSim statevector with cuQuantum.")
     parser.add_argument("-c", "--circuit", type=str, required=True)
     parser.add_argument("-n", "--qubits", type=int, required=True)
-    parser.add_argument(
-        "--device",
-        type=str,
-        choices=("cpu", "gpu"),
-        default="cpu",
-        help="Qiskit Aer backend device.",
-    )
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--num-batch", type=int, default=50)
     parser.add_argument("--fidelity-threshold", type=float, default=0.9999)
     parser.add_argument("--rmse-threshold", type=float, default=1e-5)
-    parser.add_argument("--qasm", type=str, default=None)
-    parser.add_argument("--input", type=str, default=None)
     parser.add_argument("--qbsim", type=str, default=None)
+    parser.add_argument("--reference", type=str, default=None)
+    parser.add_argument("--cuquantum-binary", type=str, default=None)
+    parser.add_argument(
+        "--reuse-reference",
+        action="store_true",
+        help="Use an existing cuQuantum reference state file instead of regenerating it.",
+    )
+    # Kept for backward compatibility with older verify.py calls; cuQuantum does not use it.
+    parser.add_argument("--device", type=str, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parent
-    qasm_path = Path(args.qasm) if args.qasm else base / "circuits" / f"{args.circuit}_n{args.qubits}.qasm"
-    input_path = Path(args.input) if args.input else base / "input_batch" / f"n{args.qubits}.txt"
     qbsim_path = (
         Path(args.qbsim)
         if args.qbsim
         else base / "log" / "results" / "state" / f"qbsim_{args.circuit}_n{args.qubits}.txt"
     )
+    reference_path = (
+        Path(args.reference)
+        if args.reference
+        else base / "log" / "results" / "state" / f"cuquantum{args.circuit}_n{args.qubits}.txt"
+    )
+    cuquantum_binary = (
+        Path(args.cuquantum_binary)
+        if args.cuquantum_binary
+        else base / "build" / "cuquantum_test" / "cuquantum"
+    )
+
+    ref_status = build_cuquantum_reference(
+        circuit_name=args.circuit,
+        num_qubits=args.qubits,
+        batch_size=args.batch_size,
+        num_batch=args.num_batch,
+        cuquantum_binary=cuquantum_binary,
+        reference_path=reference_path,
+        reuse_reference=args.reuse_reference,
+    )
+    if ref_status != 0:
+        return ref_status
 
     return verify(
         circuit_name=args.circuit,
         num_qubits=args.qubits,
-        qasm_path=qasm_path,
-        input_state_path=input_path,
         qbsim_path=qbsim_path,
-        device=args.device,
+        reference_path=reference_path,
         fidelity_threshold=args.fidelity_threshold,
         rmse_threshold=args.rmse_threshold,
     )

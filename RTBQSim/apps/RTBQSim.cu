@@ -22,7 +22,6 @@ int main(int argc, char** argv) { // NOLINT(bugprone-exception-escape)
         ("ps", "print simulation stats (applied gates, sim. time, and maximal size of the DD")
         ("batch_size", "number of states in a batch (integer)", cxxopts::value<int>())
         ("num_batch", "number of batches (integer)", cxxopts::value<int>())
-        ("conversion_type", "legacy option (ignored in SPMSPM mode)", cxxopts::value<int>())
         ("file", "simulate a quantum circuit given by file (detection by the file extension)", cxxopts::value<std::string>());
 
     // clang-format on
@@ -35,14 +34,8 @@ int main(int argc, char** argv) { // NOLINT(bugprone-exception-escape)
 
     const int batch_size     = vm["batch_size"].as<int>();
     const int num_batch      = vm["num_batch"].as<int>();
-    if (vm.count("conversion_type") > 0) {
-        (void)vm["conversion_type"].as<int>();
-    }
-    // const int conversion_edge_thresh = vm["conversion_edge_thresh"].as<int>();
-
     std::unique_ptr<qc::QuantumComputation>              quantumComputation;
     std::unique_ptr<QBatchSimulator>  qbatchsim{nullptr};
-    const bool                                           verbose = vm.count("verbose") > 0;
 
     if (vm.count("file") > 0) {
         const std::string fname = vm["file"].as<std::string>();
@@ -57,7 +50,6 @@ int main(int argc, char** argv) { // NOLINT(bugprone-exception-escape)
     if (qbatchsim->getNumberOfQubits() > 100) {
         std::clog << "[WARNING] Quantum computation contains quite a few qubits. You're jumping into the deep end.\n";
     }
-    // qbatchsim->conversion_edge_thresh = conversion_edge_thresh;
     qbatchsim->simulate();
 
 

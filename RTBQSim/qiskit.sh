@@ -211,9 +211,9 @@ run_no_fusion_suite() {
     print_total_case "${device}" graph_state 16
     print_total_case "${device}" graph_state 18
     print_total_case "${device}" graph_state 20
-    print_total_case "${device}" dnn 17
-    print_total_case "${device}" dnn 19
-    print_total_case "${device}" dnn 21
+    print_total_case "${device}" qnn 17
+    print_total_case "${device}" qnn 19
+    print_total_case "${device}" qnn 21
   } | tee "${log_path}"
 }
 
@@ -238,9 +238,9 @@ run_fusion_export_suite() {
     print_fusion_export_case graph_state 16
     print_fusion_export_case graph_state 18
     print_fusion_export_case graph_state 20
-    print_fusion_export_case dnn 17
-    print_fusion_export_case dnn 19
-    print_fusion_export_case dnn 21
+    print_fusion_export_case qnn 17
+    print_fusion_export_case qnn 19
+    print_fusion_export_case qnn 21
   } | tee "${log_path}"
 }
 

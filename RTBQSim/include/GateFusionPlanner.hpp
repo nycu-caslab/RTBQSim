@@ -98,12 +98,6 @@ inline std::vector<int> plannerTouchedQubits(const qc::GatePrimitive& gate) {
   return qubits;
 }
 
-inline bool plannerIsSubsetOf(const std::vector<int>& needle,
-                              const std::vector<int>& haystack) {
-  return std::includes(haystack.begin(), haystack.end(),
-                       needle.begin(), needle.end());
-}
-
 inline std::vector<int> plannerUnionQubits(const std::vector<int>& lhs,
                                            const std::vector<int>& rhs) {
   std::vector<int> merged;

@@ -1,11 +1,11 @@
 cd build/
 
-./main dnn 17 32 200 0
-./main dnn 17 64 200 0
-./main dnn 17 128 200 0
-./main dnn 17 256 200 0
-./main dnn 17 512 200 0
-./main dnn 17 1024 200 0
+./main qnn 17 32 200 0
+./main qnn 17 64 200 0
+./main qnn 17 128 200 0
+./main qnn 17 256 200 0
+./main qnn 17 512 200 0
+./main qnn 17 1024 200 0
 
 ./main vqe 16 32 200 0
 ./main vqe 16 64 200 0

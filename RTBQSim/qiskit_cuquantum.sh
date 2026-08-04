@@ -268,9 +268,9 @@ run_suite() {
       print_case graph_state 16
       print_case graph_state 18
       print_case graph_state 20
-      print_case dnn 17
-      print_case dnn 19
-      print_case dnn 21
+      print_case qnn 17
+      print_case qnn 19
+      print_case qnn 21
     fi
   } | tee "${log_path}"
 }

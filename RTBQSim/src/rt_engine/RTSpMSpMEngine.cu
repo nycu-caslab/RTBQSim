@@ -303,7 +303,7 @@ bool gateHasOneRayPerRow(const qc::GatePrimitive& gate) {
   return true;
 }
 
-// Map COO (row,col) points to one triangle (3 vertices) per NNZ for OptiX GAS.
+// Map COO (row,col) points to one triangle (3 vertices) per NNZ for the OptiX BVH tree.
 // NOTE:
 // Rays travel along +x with fixed y = col + 0.5 and fixed z = 0.5.
 // To guarantee robust hits, each primitive triangle is placed on the plane
@@ -1348,7 +1348,7 @@ struct RTSpMSpMEngine::Impl {
     sphere_capacity = required_primitives;
   }
 
-  // Build or update GAS from current primitive geometry.
+  // Build or update the BVH tree from current primitive geometry.
   void buildGas(bool try_update = false) {
     if (primitive_type == RTPrimitiveType::Sphere) {
       if (!state.spherePoints || !state.sphereRadius || state.sphere_size == 0) {
@@ -2039,7 +2039,7 @@ bool RTSpMSpMEngine::prepareGeometryFromGates(const qc::GatePrimitive* gates,
     fused_gates_applied = 1;
     impl->last_fused_gates = fused_gates_applied;
     // The seed gate initializes the accumulated matrix for this fusion block
-    // and does not execute BVH update/rebuild. Count it as "skip" so
+    // and does not execute BVH tree update/rebuild. Count it as "skip" so
     // update+rebuild+skip matches applied gate count semantics.
     ++total_bvh_skip_count;
     if (envFlag("RT_DUMP_GATE_TRAVERSAL")) {

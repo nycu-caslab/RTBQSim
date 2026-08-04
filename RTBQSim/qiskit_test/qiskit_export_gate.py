@@ -194,7 +194,7 @@ def write_fused_ops(file_path: Path, fused_ops):
 def main():
     parser = argparse.ArgumentParser(description="Qiskit fused-gate exporter.")
     parser.add_argument("--circuit_name", "-c", type=str, required=True,
-                        help="Name of the circuit (e.g., dnn, vqe)")
+                        help="Name of the circuit (e.g., qnn, vqe)")
     parser.add_argument("--num_qubits", "-n", type=int, required=True,
                         help="Number of qubits")
     parser.add_argument("--fusion-engine", choices=("raw", "transpiler", "aer"), default="transpiler",

@@ -10,13 +10,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${ROOT_DIR}/build-rt"
 
 ## different strategy ==
-: "${RT_GAS_ALLOW_UPDATE:=1}" # 進行 bvh tree refit，1: allow OptiX GAS update when primitive count unchanged.
-: "${RT_REUSE_BUFFER:=1}" # 進行 memory buffer reuse ， 1: reuse GAS output + sphere/ray geometry work buffers to reduce cudaMalloc/cudaFree.
+: "${RT_GAS_ALLOW_UPDATE:=1}" # BVH tree refit，1: allow OptiX BVH tree update when primitive count unchanged.
+: "${RT_REUSE_BUFFER:=1}" # memory buffer reuse ， 1: reuse BVH tree output + sphere/ray geometry work buffers to reduce cudaMalloc/cudaFree.
 : "${RT_PRIMITIVE_TYPE:=triangle}" # triangle|sphere: choose the RTSpMSpM primitive used for OptiX traversal.
-: "${RT_NNZ1_SPECIAL:=1}" # 進行 nnz = 1 的特殊處理 1: enable diagonal and row_nnz=1 special fast paths; 0: force both kinds of gates through the regular RT path.
-: "${RT_ENABLE_GATE_FUSION:=1}" # 進行 gate fusion，1: enable Stage-1 gate fusion, 0: bypass fusion and directly pack primitive gates into Stage-2 ELL inputs.
-: "${RT_USE_DAG_FUSION:=1}" # 採用 DAG 進行 gate fusion planning 1: use DAG/dependency-graph gate fusion planning; 0: use sequential gate fusion with the same row-NNZ limit.
-: "${RT_ELL_SORTING:=1}" # 啟用 ell sorting ， 1: lexicographically reorder fused ELL rows by access pattern before Stage-2 simulation.
+: "${RT_NNZ1_SPECIAL:=1}" # 1: enable diagonal and row_nnz=1 special fast paths; 0: force both kinds of gates through the regular RT path.
+: "${RT_ENABLE_GATE_FUSION:=1}" # do gate fusion，1: enable Stage-1 gate fusion, 0: bypass fusion and directly pack primitive gates into Stage-2 ELL inputs.
+: "${RT_USE_DAG_FUSION:=1}" # use DAG to do gate fusion planning 1: use DAG/dependency-graph gate fusion planning; 0: use sequential gate fusion with the same row-NNZ limit.
+: "${RT_ELL_SORTING:=1}" # do ell sorting ， 1: lexicographically reorder fused ELL rows by access pattern before Stage-2 simulation.
 : "${RT_ENABLE_BREAKDOWN:=1}" # 1: print and collect Stage-1/Stage-2 breakdown timing for main benchmarks.
 : "${RT_DEBUG_INFO:=1}" # 1: keep per-benchmark debug logs and summarize suspicious fused blocks (ELL width > 4).
 
@@ -57,7 +57,19 @@ if [[ "${needs_compile}" -eq 1 ]]; then
   bash "${ROOT_DIR}/rt_compile.sh"
 fi
 
-verify() { python3 "${ROOT_DIR}/verify.py" -c "$1" -n "$2"; }
+VERIFY_PYTHON="${ROOT_DIR}/.venv/bin/python"
+if [[ ! -x "${VERIFY_PYTHON}" ]]; then
+  VERIFY_PYTHON="python3"
+fi
+
+verify() {
+  "${VERIFY_PYTHON}" "${ROOT_DIR}/verify.py" \
+    -c "$1" \
+    -n "$2" \
+    --batch-size 32 \
+    --num-batch 50 \
+    --cuquantum-binary "${ROOT_DIR}/build/cuquantum_test/cuquantum"
+}
 
 mkdir -p "${ROOT_DIR}/log/results/state"
 mkdir -p "${ROOT_DIR}/log/refit_tree_owner"
@@ -75,26 +87,26 @@ export BQSIM_ENABLE_BREAKDOWN="${RT_ENABLE_BREAKDOWN}"
 
 
 # the harder testcases
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/tsp_n16.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/vqe_n12.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/vqe_n14.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/vqe_n16.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qv_n12.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qv_n14.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qaoa_n13.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qaoa_n15.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qft_n14.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qft_n16.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qft_n18.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/portfolio_vqe_n16.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/portfolio_vqe_n17.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/portfolio_vqe_n18.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/graph_state_n16.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/graph_state_n18.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/graph_state_n20.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/dnn_n17.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/dnn_n19.qasm --num_batch 50 --conversion_type 2
-./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/dnn_n21.qasm --num_batch 50 --conversion_type 2
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/tsp_n16.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/vqe_n12.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/vqe_n14.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/vqe_n16.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qv_n12.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qv_n14.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qaoa_n13.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qaoa_n15.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qft_n14.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qft_n16.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qft_n18.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/portfolio_vqe_n16.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/portfolio_vqe_n17.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/portfolio_vqe_n18.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/graph_state_n16.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/graph_state_n18.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/graph_state_n20.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qnn_n17.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qnn_n19.qasm --num_batch 50
+./RTBQSim --ps --pv --batch_size 32 --file ../../circuits/qnn_n21.qasm --num_batch 50
 
 
 verify tsp 16
@@ -114,6 +126,6 @@ verify portfolio_vqe 18
 verify graph_state 16
 verify graph_state 18
 verify graph_state 20
-verify dnn 17
-verify dnn 19
-verify dnn 21
+verify qnn 17
+verify qnn 19
+verify qnn 21

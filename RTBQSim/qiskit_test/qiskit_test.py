@@ -55,7 +55,7 @@ def build_simulator(device, fusion_enabled, fusion_threshold, fusion_max_qubit, 
 def main():
     parser = argparse.ArgumentParser(description="Qiskit Aer baseline runner.")
     parser.add_argument("--circuit_name", "-c", type=str, required=True,
-                        help="Name of the circuit (e.g., dnn, vqe)")
+                        help="Name of the circuit (e.g., qnn, vqe)")
     parser.add_argument("--num_qubits", "-n", type=int, required=True,
                         help="Number of qubits")
     parser.add_argument("--rounds", "-r", type=int, default=1,
