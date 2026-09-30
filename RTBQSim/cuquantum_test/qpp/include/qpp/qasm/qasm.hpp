@@ -156,10 +156,6 @@ static std::unordered_map<ast::symbol,
              mat.block(2, 2, 2, 2) = Gates::get_no_thread_local_instance().Y;
              return mat;
          }},
-        {"swap",
-         [](const std::vector<realT>&) {
-             return Gates::get_no_thread_local_instance().SWAP;
-         }},
         {"ch",
          [](const std::vector<realT>&) {
              cmat mat{cmat::Identity(4, 4)};
@@ -182,6 +178,12 @@ static std::unordered_map<ast::symbol,
              cmat mat{cmat::Identity(4, 4)};
              mat.block(2, 2, 2, 2) =
                  Gates::get_no_thread_local_instance().RZ(args[0]);
+             return mat;
+         }},
+        {"cp", [](const std::vector<realT>& args) {
+             assert(!args.empty());
+             cmat mat{cmat::Identity(4, 4)};
+             mat(3, 3) = std::exp(1_i * args[0]);
              return mat;
          }}};
 

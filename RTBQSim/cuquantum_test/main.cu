@@ -27,14 +27,14 @@ std::string preprocess_qasm_file(const std::string &qasm_path) {
   while (std::getline(src, line)) {
     if (!inserted && line.find("qreg") != std::string::npos) {
       dst << "gate rzz(lambda) a,b { cx a,b; u1(lambda) b; cx a,b; }\n";
-      dst << "gate cp(lambda) a,b { cx a,b; u1(lambda) b; cx a,b; }\n";
+      dst << "gate cp(lambda) a,b { u1(lambda/2) a; cx a,b; u1(-lambda/2) b; cx a,b; u1(lambda/2) b; }\n";
       inserted = true;
     }
     dst << line << "\n";
   }
   if (!inserted) {
     dst << "gate rzz(lambda) a,b { cx a,b; u1(lambda) b; cx a,b; }\n";
-    dst << "gate cp(lambda) a,b { cx a,b; u1(lambda) b; cx a,b; }\n";
+    dst << "gate cp(lambda) a,b { u1(lambda/2) a; cx a,b; u1(-lambda/2) b; cx a,b; u1(lambda/2) b; }\n";
   }
   dst.close();
   return tmp_path;
