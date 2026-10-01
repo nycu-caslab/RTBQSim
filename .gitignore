@@ -22,4 +22,6 @@ RTBQSim/input_batch/n23.txt
 RTBQSim/input_batch/n24.txt
 RTBQSim/.venv/
 RTBQSim/qiskit_test/__pycache__/
+RTBQSim/circuits/random_fusion_n6.qasm
+RTBQSim/qiskit_test/compare_statevectors.py
 **/__pycache__/

@@ -35,6 +35,12 @@ append_ld_library_path() {
 : "${CUQ_OUTPUT_STATE:=0}"
 : "${CUQ_BINARY:=}"
 : "${QISKIT_PYTHON_BIN:=}"
+: "${QISKIT_FIDELITY_TEST:=1}"
+: "${QISKIT_REFERENCE_DEVICE:=cpu}"
+: "${QISKIT_REFERENCE_FUSION:=0}"
+: "${QISKIT_REFERENCE_ROUNDS:=1}"
+: "${FIDELITY_THRESHOLD:=0.9999}"
+: "${RMSE_THRESHOLD:=1e-5}"
 
 append_ld_library_path "${CUQUANTUM_VENV_LIB}"
 append_ld_library_path "${CUTENSOR_VENV_LIB}"
@@ -65,7 +71,7 @@ PY
 
 choose_python_bin() {
   local -a required_mods=("qiskit" "numpy")
-  if [[ "${QISKIT_FUSION_ENGINE}" == "aer" ]]; then
+  if [[ "${QISKIT_FUSION_ENGINE}" == "aer" || "${QISKIT_FIDELITY_TEST}" == "1" ]]; then
     required_mods+=("qiskit_aer")
   fi
 
@@ -97,7 +103,7 @@ choose_python_bin() {
 PYTHON_BIN="$(choose_python_bin || true)"
 if [[ -z "${PYTHON_BIN}" ]]; then
   required_modules_msg="qiskit, numpy"
-  if [[ "${QISKIT_FUSION_ENGINE}" == "aer" ]]; then
+  if [[ "${QISKIT_FUSION_ENGINE}" == "aer" || "${QISKIT_FIDELITY_TEST}" == "1" ]]; then
     required_modules_msg+=", qiskit_aer"
   fi
   echo "[qiskit_cuquantum.sh] No usable Python interpreter with the required modules was found." >&2
@@ -158,10 +164,39 @@ run_export_case() {
 run_cuquantum_gatefile_case() {
   local circuit="$1"
   local qubits="$2"
+  local output_state="${CUQ_OUTPUT_STATE}"
+  if [[ "${QISKIT_FIDELITY_TEST}" == "1" ]]; then
+    output_state=1
+  fi
   (
     cd "${CUQ_DIR}"
-    "${CUQ_RUNNER}" "${circuit}" "${qubits}" "${CUQ_BATCH_SIZE}" "${CUQ_NUM_BATCH}" 1 "${CUQ_OUTPUT_STATE}"
+    "${CUQ_RUNNER}" "${circuit}" "${qubits}" "${CUQ_BATCH_SIZE}" "${CUQ_NUM_BATCH}" 1 "${output_state}"
   )
+}
+
+run_qiskit_reference_case() {
+  local circuit="$1"
+  local qubits="$2"
+  "${PYTHON_BIN}" "${QISKIT_DIR}/qiskit_test.py" \
+    --circuit_name "${circuit}" \
+    --num_qubits "${qubits}" \
+    --device "${QISKIT_REFERENCE_DEVICE}" \
+    --fusion "${QISKIT_REFERENCE_FUSION}" \
+    --rounds "${QISKIT_REFERENCE_ROUNDS}" \
+    --max-parallel-threads "${QISKIT_CPU_THREADS}" \
+    --output-suffix "cuquantum_reference"
+}
+
+compare_statevectors() {
+  local circuit="$1"
+  local qubits="$2"
+  local qiskit_state="$3"
+  local cuquantum_state="${ROOT_DIR}/log/results/state/cuquantum${circuit}_n${qubits}.txt"
+  "${PYTHON_BIN}" "${QISKIT_DIR}/compare_statevectors.py" \
+    --qiskit "${qiskit_state}" \
+    --cuquantum "${cuquantum_state}" \
+    --fidelity-threshold "${FIDELITY_THRESHOLD}" \
+    --rmse-threshold "${RMSE_THRESHOLD}"
 }
 
 extract_ms() {
@@ -197,6 +232,11 @@ print_case() {
   local fused_simulation_ms
   local fused_bridge_ms
   local fused_total_ms
+  local qiskit_reference_output=""
+  local qiskit_reference_ms=""
+  local qiskit_reference_state=""
+  local comparison_output=""
+  local comparison_status=0
 
   fused_export_output="$(run_export_case "${QISKIT_FUSION_ENGINE}" "${circuit}" "${qubits}")"
   fused_export_gate_fusion_ms="$(extract_ms "Qiskit gate fusion time" "${fused_export_output}")"
@@ -223,18 +263,41 @@ print_case() {
   fi
   : "${fused_bridge_ms:=0.00}"
 
-  fused_total_ms="$(python3 - <<PY
+  fused_total_ms="$("${PYTHON_BIN}" - <<PY
 export_ms = float(${fused_export_gate_fusion_ms})
 fused_ms = float(${fused_simulation_ms})
 print(f"{export_ms + fused_ms:.2f}")
 PY
   )"
 
+  if [[ "${QISKIT_FIDELITY_TEST}" == "1" ]]; then
+    qiskit_reference_output="$(run_qiskit_reference_case "${circuit}" "${qubits}")"
+    qiskit_reference_ms="$(extract_ms "Qiskit runtime" "${qiskit_reference_output}")"
+    qiskit_reference_state="$(extract_value "Output saved" "${qiskit_reference_output}")"
+    if [[ -z "${qiskit_reference_ms}" || -z "${qiskit_reference_state}" ]]; then
+      echo "[qiskit_cuquantum.sh] Failed to run Qiskit reference for ${circuit}_n${qubits}." >&2
+      return 1
+    fi
+
+    if comparison_output="$(compare_statevectors "${circuit}" "${qubits}" "${qiskit_reference_state}")"; then
+      comparison_status=0
+    else
+      comparison_status=$?
+    fi
+  fi
+
   echo "Qiskit+cuQuantum Reuse: ${circuit}_n${qubits}"
   echo "Qiskit gate fusion time: ${fused_export_gate_fusion_ms} [ms]"
   echo "cuQuantum simulation time: ${fused_simulation_ms} [ms]"
   echo "Qiskit+cuQuantum total time: ${fused_total_ms} [ms]"
+  if [[ "${QISKIT_FIDELITY_TEST}" == "1" ]]; then
+    echo "Qiskit reference runtime: ${qiskit_reference_ms} [ms]"
+    echo "${comparison_output}"
+  fi
   echo
+  if (( comparison_status != 0 )); then
+    return "${comparison_status}"
+  fi
 }
 
 run_suite() {
