@@ -113,6 +113,29 @@ struct PlannerBlockState {
   std::vector<std::vector<int>> qubit_sets{};
 };
 
+struct PlannerGateInfo {
+  std::vector<int> qubits{};
+  bool is_diagonal = false;
+  bool is_cnot = false;
+  int control = -1;
+  int target = -1;
+};
+
+inline PlannerGateInfo plannerBuildGateInfo(const qc::GatePrimitive& gate) {
+  PlannerGateInfo info;
+  info.qubits = plannerTouchedQubits(gate);
+  info.is_diagonal = plannerIsDiagonalGate(gate);
+  info.is_cnot = gate.control_count == 1 &&
+                 gate.target_count == 1 &&
+                 static_cast<qc::OpType>(gate.gate_type) == qc::X &&
+                 plannerGateHasOneRayPerRow(gate);
+  if (info.is_cnot) {
+    info.control = gate.controls[0];
+    info.target = gate.targets[0];
+  }
+  return info;
+}
+
 inline bool plannerHasSingleton(const PlannerBlockState& state, int qubit) {
   return std::any_of(state.qubit_sets.begin(),
                      state.qubit_sets.end(),
@@ -121,104 +144,92 @@ inline bool plannerHasSingleton(const PlannerBlockState& state, int qubit) {
                      });
 }
 
-inline bool plannerQubitSetsIntersect(const std::vector<int>& lhs,
-                                      const std::vector<int>& rhs) {
-  std::size_t i = 0;
-  std::size_t j = 0;
-  while (i < lhs.size() && j < rhs.size()) {
-    if (lhs[i] == rhs[j]) {
+inline bool plannerFindSaturatedSubsetOfSize(
+    const PlannerBlockState& state,
+    std::size_t target_size,
+    std::size_t next_index,
+    std::vector<std::size_t>& selected_indices,
+    const std::vector<int>& selected_qubits,
+    bool has_composite,
+    std::vector<std::size_t>& result_indices,
+    std::vector<int>& result_qubits) {
+  if (selected_indices.size() == target_size) {
+    if (has_composite && selected_qubits.size() <= target_size) {
+      result_indices = selected_indices;
+      result_qubits = selected_qubits;
       return true;
     }
-    if (lhs[i] < rhs[j]) {
-      ++i;
-    } else {
-      ++j;
+    return false;
+  }
+
+  const std::size_t needed = target_size - selected_indices.size();
+  const std::size_t set_count = state.qubit_sets.size();
+  for (std::size_t index = next_index; index + needed <= set_count; ++index) {
+    const auto merged_qubits = plannerUnionQubits(selected_qubits,
+                                                  state.qubit_sets[index]);
+    if (merged_qubits.size() > target_size) {
+      continue;
+    }
+    selected_indices.push_back(index);
+    if (plannerFindSaturatedSubsetOfSize(state,
+                                         target_size,
+                                         index + 1,
+                                         selected_indices,
+                                         merged_qubits,
+                                         has_composite || state.qubit_sets[index].size() > 1,
+                                         result_indices,
+                                         result_qubits)) {
+      return true;
+    }
+    selected_indices.pop_back();
+  }
+  return false;
+}
+
+inline bool plannerFindSaturatedSubset(const PlannerBlockState& state,
+                                       std::vector<std::size_t>& result_indices,
+                                       std::vector<int>& result_qubits) {
+  for (std::size_t target_size = 2;
+       target_size <= state.qubit_sets.size();
+       ++target_size) {
+    std::vector<std::size_t> selected_indices;
+    selected_indices.reserve(target_size);
+    if (plannerFindSaturatedSubsetOfSize(state,
+                                         target_size,
+                                         0,
+                                         selected_indices,
+                                         {},
+                                         false,
+                                         result_indices,
+                                         result_qubits)) {
+      return true;
     }
   }
   return false;
 }
 
-inline void plannerRemoveFullyCoveredCompositeSets(PlannerBlockState& state) {
-  std::vector<int> singleton_qubits;
-  singleton_qubits.reserve(state.qubit_sets.size());
-  for (const auto& qubit_set : state.qubit_sets) {
-    if (qubit_set.size() == 1) {
-      singleton_qubits.push_back(qubit_set.front());
+inline void plannerNormalizeSaturatedSets(PlannerBlockState& state) {
+  std::vector<std::size_t> saturated_indices;
+  std::vector<int> saturated_qubits;
+  while (plannerFindSaturatedSubset(state, saturated_indices, saturated_qubits)) {
+    std::vector<char> remove_set(state.qubit_sets.size(), 0);
+    for (std::size_t index : saturated_indices) {
+      remove_set[index] = 1;
     }
-  }
-  std::sort(singleton_qubits.begin(), singleton_qubits.end());
-  singleton_qubits.erase(std::unique(singleton_qubits.begin(), singleton_qubits.end()),
-                         singleton_qubits.end());
 
-  state.qubit_sets.erase(
-      std::remove_if(state.qubit_sets.begin(),
-                     state.qubit_sets.end(),
-                     [&singleton_qubits](const std::vector<int>& qubit_set) {
-                       return qubit_set.size() > 1 &&
-                              std::includes(singleton_qubits.begin(),
-                                            singleton_qubits.end(),
-                                            qubit_set.begin(),
-                                            qubit_set.end());
-                     }),
-      state.qubit_sets.end());
-}
-
-inline bool plannerComponentHasMoreDimensionsThanQubits(const PlannerBlockState& state,
-                                                        std::size_t seed) {
-  std::vector<char> in_component(state.qubit_sets.size(), 0);
-  in_component[seed] = 1;
-
-  bool expanded = true;
-  while (expanded) {
-    expanded = false;
-    for (std::size_t i = 0; i < state.qubit_sets.size(); ++i) {
-      if (in_component[i]) {
-        continue;
-      }
-      for (std::size_t j = 0; j < state.qubit_sets.size(); ++j) {
-        if (in_component[j] &&
-            plannerQubitSetsIntersect(state.qubit_sets[i], state.qubit_sets[j])) {
-          in_component[i] = 1;
-          expanded = true;
-          break;
-        }
+    std::vector<std::vector<int>> normalized_sets;
+    normalized_sets.reserve(state.qubit_sets.size() - saturated_indices.size() +
+                            saturated_qubits.size());
+    for (std::size_t index = 0; index < state.qubit_sets.size(); ++index) {
+      if (!remove_set[index]) {
+        normalized_sets.push_back(state.qubit_sets[index]);
       }
     }
-  }
-
-  std::vector<int> physical_qubits;
-  std::size_t dimensions = 0;
-  for (std::size_t i = 0; i < state.qubit_sets.size(); ++i) {
-    if (!in_component[i]) {
-      continue;
-    }
-    physical_qubits = plannerUnionQubits(physical_qubits, state.qubit_sets[i]);
-    ++dimensions;
-  }
-  return dimensions > physical_qubits.size();
-}
-
-inline void plannerRemovePhysicallyRedundantDuplicateCompositeSets(
-    PlannerBlockState& state) {
-  while (true) {
-    bool removed = false;
-    for (std::size_t i = 0; i < state.qubit_sets.size(); ++i) {
-      if (state.qubit_sets[i].size() <= 1) {
-        continue;
+    state.qubit_sets = std::move(normalized_sets);
+    for (int qubit : saturated_qubits) {
+      if (!plannerHasSingleton(state, qubit)) {
+        state.qubit_sets.push_back({qubit});
       }
-      const auto duplicate = std::find(state.qubit_sets.begin() + i + 1,
-                                       state.qubit_sets.end(),
-                                       state.qubit_sets[i]);
-      if (duplicate == state.qubit_sets.end() ||
-          !plannerComponentHasMoreDimensionsThanQubits(state, i)) {
-        continue;
-      }
-      state.qubit_sets.erase(state.qubit_sets.begin() + i);
-      removed = true;
-      break;
-    }
-    if (!removed) {
-      return;
     }
   }
 }
@@ -226,10 +237,25 @@ inline void plannerRemovePhysicallyRedundantDuplicateCompositeSets(
 struct PlannerSearchState {
   PlannerBlockState block_state{};
   std::vector<std::size_t> chosen{};
-  std::vector<char> in_block{};
+  std::vector<std::uint64_t> selected{};
   std::size_t first_gate = std::numeric_limits<std::size_t>::max();
   std::size_t last_gate = 0;
 };
+
+inline bool plannerGateSelected(const std::vector<std::uint64_t>& selected,
+                                std::size_t gate) {
+  return (selected[gate >> 6U] & (1ULL << (gate & 63U))) != 0;
+}
+
+inline void plannerSetGateSelected(std::vector<std::uint64_t>& selected,
+                                   std::size_t gate) {
+  selected[gate >> 6U] |= 1ULL << (gate & 63U);
+}
+
+inline void plannerClearGateSelected(std::vector<std::uint64_t>& selected,
+                                     std::size_t gate) {
+  selected[gate >> 6U] &= ~(1ULL << (gate & 63U));
+}
 
 inline std::size_t plannerBlockSpan(const PlannerSearchState& state) {
   if (state.chosen.empty()) {
@@ -257,46 +283,38 @@ inline bool plannerSearchStateBetter(const PlannerSearchState& lhs,
   return lhs.chosen < rhs.chosen;
 }
 
-inline bool plannerIsReadyForBlock(std::size_t idx,
-                                   const std::vector<std::vector<std::size_t>>& predecessors,
-                                   const std::vector<char>& globally_scheduled,
-                                   const std::vector<char>& in_block) {
-  if (globally_scheduled[idx] || in_block[idx]) {
-    return false;
-  }
-  for (std::size_t pred : predecessors[idx]) {
-    if (!globally_scheduled[pred] && !in_block[pred]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-inline void plannerCollectReadyCandidates(
+inline void plannerInitializeReadyCandidates(
     const std::vector<std::vector<std::size_t>>& predecessors,
     const std::vector<char>& globally_scheduled,
-    const std::vector<char>& in_block,
+    std::vector<std::size_t>& pending_predecessors,
     std::vector<std::size_t>& out_candidates) {
+  pending_predecessors.assign(predecessors.size(), 0);
   out_candidates.clear();
   for (std::size_t idx = 0; idx < predecessors.size(); ++idx) {
-    if (!plannerIsReadyForBlock(idx, predecessors, globally_scheduled, in_block)) {
+    if (globally_scheduled[idx]) {
       continue;
     }
-    out_candidates.push_back(idx);
+    for (std::size_t pred : predecessors[idx]) {
+      if (!globally_scheduled[pred]) {
+        ++pending_predecessors[idx];
+      }
+    }
+    if (pending_predecessors[idx] == 0) {
+      out_candidates.push_back(idx);
+    }
   }
 }
 
-inline bool plannerApplyGateToBlockState(const qc::GatePrimitive& gate,
-                                         const std::vector<int>& gate_qubits,
+inline bool plannerApplyGateToBlockState(const PlannerGateInfo& gate_info,
                                          int max_group_qubits,
                                          PlannerBlockState& state) {
-  if (plannerIsDiagonalGate(gate)) {
+  if (gate_info.is_diagonal) {
     return true;
   }
 
-  if (plannerGateIsCNOT(gate)) {
-    const int control = gate.controls[0];
-    const int target = gate.targets[0];
+  if (gate_info.is_cnot) {
+    const int control = gate_info.control;
+    const int target = gate_info.target;
     if (plannerHasSingleton(state, control) && plannerHasSingleton(state, target)) {
       return true;
     }
@@ -304,7 +322,7 @@ inline bool plannerApplyGateToBlockState(const qc::GatePrimitive& gate,
     bool updated = false;
     for (auto& qubit_set : state.qubit_sets) {
       if (qubit_set.size() == 1 && qubit_set.front() == control) {
-        qubit_set = plannerUnionQubits(qubit_set, gate_qubits);
+        qubit_set = plannerUnionQubits(qubit_set, gate_info.qubits);
         updated = true;
         break;
       }
@@ -313,7 +331,7 @@ inline bool plannerApplyGateToBlockState(const qc::GatePrimitive& gate,
     if (!updated) {
       for (auto it = state.qubit_sets.rbegin(); it != state.qubit_sets.rend(); ++it) {
         if (std::binary_search(it->begin(), it->end(), control)) {
-          *it = plannerUnionQubits(*it, gate_qubits);
+          *it = plannerUnionQubits(*it, gate_info.qubits);
           updated = true;
           break;
         }
@@ -324,52 +342,30 @@ inline bool plannerApplyGateToBlockState(const qc::GatePrimitive& gate,
       return true;
     }
 
-    while (true) {
-      bool split = false;
-      for (const auto& candidate : state.qubit_sets) {
-        if (candidate.size() <= 1) {
-          continue;
-        }
-        const auto copies = static_cast<std::size_t>(std::count(
-            state.qubit_sets.begin(), state.qubit_sets.end(), candidate));
-        if (copies != candidate.size()) {
-          continue;
-        }
-
-        const std::vector<int> copied_set = candidate;
-        state.qubit_sets.erase(
-            std::remove(state.qubit_sets.begin(), state.qubit_sets.end(), copied_set),
-            state.qubit_sets.end());
-        for (int qubit : copied_set) {
-          if (!plannerHasSingleton(state, qubit)) {
-            state.qubit_sets.push_back({qubit});
-          }
-        }
-        split = true;
-        break;
-      }
-      if (!split) {
-        break;
-      }
-    }
-
-    plannerRemoveFullyCoveredCompositeSets(state);
-    plannerRemovePhysicallyRedundantDuplicateCompositeSets(state);
+    plannerNormalizeSaturatedSets(state);
     return true;
   }
 
-  for (int qubit : gate_qubits) {
+  for (int qubit : gate_info.qubits) {
     if (!plannerHasSingleton(state, qubit)) {
       state.qubit_sets.push_back({qubit});
     }
   }
-  plannerRemoveFullyCoveredCompositeSets(state);
-  plannerRemovePhysicallyRedundantDuplicateCompositeSets(state);
+  plannerNormalizeSaturatedSets(state);
 
   if (static_cast<int>(state.qubit_sets.size()) > max_group_qubits) {
     return false;
   }
   return true;
+}
+
+inline bool plannerApplyGateToBlockState(const qc::GatePrimitive& gate,
+                                         const std::vector<int>& gate_qubits,
+                                         int max_group_qubits,
+                                         PlannerBlockState& state) {
+  PlannerGateInfo gate_info = plannerBuildGateInfo(gate);
+  gate_info.qubits = gate_qubits;
+  return plannerApplyGateToBlockState(gate_info, max_group_qubits, state);
 }
 
 inline bool plannerAppendGateRangeToState(const std::vector<qc::GatePrimitive>& gates,
@@ -391,23 +387,23 @@ inline bool plannerAppendGateRangeToState(const std::vector<qc::GatePrimitive>& 
 }
 
 struct PlannerSearchKey {
-  std::vector<char> in_block{};
+  std::vector<std::uint64_t> selected{};
   std::vector<std::vector<int>> qubit_sets{};
 
   bool operator==(const PlannerSearchKey& other) const {
-    return in_block == other.in_block && qubit_sets == other.qubit_sets;
+    return selected == other.selected && qubit_sets == other.qubit_sets;
   }
 };
 
 struct PlannerSearchKeyHash {
   std::size_t operator()(const PlannerSearchKey& key) const {
-    std::size_t hash = key.in_block.size();
+    std::size_t hash = key.selected.size();
     const auto combine = [&hash](std::size_t value) {
       hash ^= value + 0x9e3779b9U + (hash << 6U) + (hash >> 2U);
     };
 
-    for (char selected : key.in_block) {
-      combine(static_cast<std::size_t>(selected));
+    for (std::uint64_t word : key.selected) {
+      combine(std::hash<std::uint64_t>{}(word));
     }
     combine(key.qubit_sets.size());
     for (const auto& qubit_set : key.qubit_sets) {
@@ -421,16 +417,17 @@ struct PlannerSearchKeyHash {
 };
 
 inline void plannerSearchMaximumBlock(
-    const std::vector<qc::GatePrimitive>& primitives,
-    const std::vector<std::vector<int>>& gate_qubits,
-    const std::vector<std::vector<std::size_t>>& predecessors,
+    const std::vector<PlannerGateInfo>& gate_infos,
+    const std::vector<std::vector<std::size_t>>& successors,
     const std::vector<char>& globally_scheduled,
     int max_group_qubits,
-    const PlannerSearchState& state,
+    PlannerSearchState& state,
+    std::vector<std::size_t>& pending_predecessors,
+    std::vector<std::size_t>& ready_candidates,
     std::unordered_set<PlannerSearchKey, PlannerSearchKeyHash>& visited,
     PlannerSearchState& best_state,
     bool& have_best_state) {
-  PlannerSearchKey key{state.in_block, state.block_state.qubit_sets};
+  PlannerSearchKey key{state.selected, state.block_state.qubit_sets};
   if (!visited.insert(std::move(key)).second) {
     return;
   }
@@ -441,57 +438,106 @@ inline void plannerSearchMaximumBlock(
     have_best_state = true;
   }
 
-  std::vector<std::size_t> ready_candidates;
-  plannerCollectReadyCandidates(predecessors,
-                                globally_scheduled,
-                                state.in_block,
-                                ready_candidates);
-
-  for (std::size_t idx : ready_candidates) {
-    PlannerSearchState next_state = state;
-    if (!plannerApplyGateToBlockState(primitives[idx],
-                                      gate_qubits[idx],
+  for (std::size_t candidate_pos = 0;
+       candidate_pos < ready_candidates.size();
+       ++candidate_pos) {
+    const std::size_t idx = ready_candidates[candidate_pos];
+    PlannerBlockState next_block_state = state.block_state;
+    if (!plannerApplyGateToBlockState(gate_infos[idx],
                                       max_group_qubits,
-                                      next_state.block_state)) {
+                                      next_block_state)) {
       continue;
     }
 
-    next_state.in_block[idx] = 1;
-    next_state.chosen.push_back(idx);
-    next_state.first_gate = std::min(next_state.first_gate, idx);
-    next_state.last_gate = std::max(next_state.last_gate, idx);
-    plannerSearchMaximumBlock(primitives,
-                              gate_qubits,
-                              predecessors,
+    PlannerBlockState previous_block_state = std::move(state.block_state);
+    state.block_state = std::move(next_block_state);
+    plannerSetGateSelected(state.selected, idx);
+    state.chosen.push_back(idx);
+    const std::size_t previous_first_gate = state.first_gate;
+    const std::size_t previous_last_gate = state.last_gate;
+    state.first_gate = std::min(state.first_gate, idx);
+    state.last_gate = std::max(state.last_gate, idx);
+
+    ready_candidates.erase(ready_candidates.begin() + candidate_pos);
+    std::vector<std::size_t> newly_ready;
+    newly_ready.reserve(successors[idx].size());
+    for (std::size_t successor : successors[idx]) {
+      if (globally_scheduled[successor] || plannerGateSelected(state.selected, successor)) {
+        continue;
+      }
+      --pending_predecessors[successor];
+      if (pending_predecessors[successor] == 0) {
+        const auto position = std::lower_bound(ready_candidates.begin(),
+                                               ready_candidates.end(),
+                                               successor);
+        ready_candidates.insert(position, successor);
+        newly_ready.push_back(successor);
+      }
+    }
+
+    plannerSearchMaximumBlock(gate_infos,
+                              successors,
                               globally_scheduled,
                               max_group_qubits,
-                              next_state,
+                              state,
+                              pending_predecessors,
+                              ready_candidates,
                               visited,
                               best_state,
                               have_best_state);
+
+    for (std::size_t successor : successors[idx]) {
+      if (globally_scheduled[successor] || plannerGateSelected(state.selected, successor)) {
+        continue;
+      }
+      ++pending_predecessors[successor];
+    }
+    for (std::size_t successor : newly_ready) {
+      const auto position = std::lower_bound(ready_candidates.begin(),
+                                             ready_candidates.end(),
+                                             successor);
+      if (position != ready_candidates.end() && *position == successor) {
+        ready_candidates.erase(position);
+      }
+    }
+    ready_candidates.insert(ready_candidates.begin() + candidate_pos, idx);
+
+    state.last_gate = previous_last_gate;
+    state.first_gate = previous_first_gate;
+    state.chosen.pop_back();
+    plannerClearGateSelected(state.selected, idx);
+    state.block_state = std::move(previous_block_state);
   }
 }
 
-inline bool plannerChooseNextBlock(const std::vector<qc::GatePrimitive>& primitives,
-                                   const std::vector<std::vector<int>>& gate_qubits,
+inline bool plannerChooseNextBlock(const std::vector<PlannerGateInfo>& gate_infos,
                                    const std::vector<std::vector<std::size_t>>& predecessors,
+                                   const std::vector<std::vector<std::size_t>>& successors,
                                    const std::vector<char>& globally_scheduled,
                                    int max_group_qubits,
                                    std::vector<std::size_t>& chosen_block) {
   chosen_block.clear();
 
   PlannerSearchState initial;
-  initial.in_block.assign(primitives.size(), 0);
+  initial.selected.assign((gate_infos.size() + 63U) / 64U, 0);
+
+  std::vector<std::size_t> pending_predecessors;
+  std::vector<std::size_t> ready_candidates;
+  plannerInitializeReadyCandidates(predecessors,
+                                   globally_scheduled,
+                                   pending_predecessors,
+                                   ready_candidates);
 
   PlannerSearchState best_state;
   bool have_best_state = false;
   std::unordered_set<PlannerSearchKey, PlannerSearchKeyHash> visited;
-  plannerSearchMaximumBlock(primitives,
-                            gate_qubits,
-                            predecessors,
+  plannerSearchMaximumBlock(gate_infos,
+                            successors,
                             globally_scheduled,
                             max_group_qubits,
                             initial,
+                            pending_predecessors,
+                            ready_candidates,
                             visited,
                             best_state,
                             have_best_state);
@@ -530,14 +576,15 @@ inline bool buildGateFusionPlan(const std::vector<qc::GatePrimitive>& primitives
   const int max_group_qubits = plannerMaxGroupQubitsFromRowNNZLimit(row_nnz_limit);
 
   const std::size_t n = primitives.size();
-  std::vector<std::vector<int>> gate_qubits(n);
+  std::vector<PlannerGateInfo> gate_infos(n);
   std::vector<std::vector<std::size_t>> predecessors(n);
+  std::vector<std::vector<std::size_t>> successors(n);
   std::unordered_map<int, std::size_t> last_touch;
   last_touch.reserve(n * 2);
 
   for (std::size_t idx = 0; idx < n; ++idx) {
-    gate_qubits[idx] = plannerTouchedQubits(primitives[idx]);
-    const auto& qubits = gate_qubits[idx];
+    gate_infos[idx] = plannerBuildGateInfo(primitives[idx]);
+    const auto& qubits = gate_infos[idx].qubits;
     std::vector<std::size_t> preds;
     preds.reserve(qubits.size());
     for (int q : qubits) {
@@ -554,6 +601,11 @@ inline bool buildGateFusionPlan(const std::vector<qc::GatePrimitive>& primitives
       last_touch[q] = idx;
     }
   }
+  for (std::size_t idx = 0; idx < n; ++idx) {
+    for (std::size_t predecessor : predecessors[idx]) {
+      successors[predecessor].push_back(idx);
+    }
+  }
 
   std::vector<char> globally_scheduled(n, 0);
   std::size_t scheduled_count = 0;
@@ -563,9 +615,9 @@ inline bool buildGateFusionPlan(const std::vector<qc::GatePrimitive>& primitives
 
   while (scheduled_count < n) {
     std::vector<std::size_t> chosen_block;
-    if (!plannerChooseNextBlock(primitives,
-                                gate_qubits,
+    if (!plannerChooseNextBlock(gate_infos,
                                 predecessors,
+                                successors,
                                 globally_scheduled,
                                 max_group_qubits,
                                 chosen_block)) {
